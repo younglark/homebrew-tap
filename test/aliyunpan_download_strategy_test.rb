@@ -363,6 +363,43 @@ class AliyunpanDownloadStrategyTest < Minitest::Test
   end
 
 
+  # Real aliyunpan v0.4.0 saves to --saveto plus the cloud path, e.g.
+  # $saveto/Software/mumuplayer/1.9.9.forge/MuMuPlayer_Pro_1.9.9.forge_app.tar.gz
+  def test_fetch_uses_cloud_hierarchy_under_saveto
+    ENV["FAKE_ALIYUNPAN_MODE"] = "nested"
+    url = "aliyunpan:///Software/mumuplayer/1.9.9.forge/MuMuPlayer_Pro_1.9.9.forge_app.tar.gz"
+    strategy = new_strategy(url)
+
+    strategy.fetch
+
+    assert_path_exists strategy.cached_location
+    assert_equal "MuMuPlayer_Pro_1.9.9.forge_app.tar.gz", strategy.basename.to_s
+    verify_sha256!(strategy.cached_location, FIXTURE_SHA256)
+    refute_path_exists strategy.temporary_path
+  end
+
+  def test_does_not_pick_same_name_file_outside_expected_nested_path
+    ENV["FAKE_ALIYUNPAN_MODE"] = "flat_decoy"
+    File.write(@artifact, "decoy-not-the-archive\n")
+    url = "aliyunpan:///Software/mumuplayer/1.9.9.forge/MuMuPlayer_Pro_1.9.9.forge_app.tar.gz"
+    strategy = new_strategy(url)
+
+    error = assert_raises(AliyunpanDownloadError) { strategy.fetch }
+    assert_match(/exit(?:ed)? 0|did not write/i, error.message)
+    refute_path_exists strategy.cached_location
+  end
+
+  def test_rejects_cloud_path_that_escapes_the_save_directory
+    ENV["FAKE_ALIYUNPAN_MODE"] = "nested"
+    url = "aliyunpan:///Software/../../outside/MuMuPlayer_Pro_1.9.9.forge_app.tar.gz"
+    strategy = new_strategy(url)
+
+    error = assert_raises(AliyunpanDownloadError) { strategy.fetch }
+    assert_match(/escapes|invalid cloud path|unsafe/i, error.message)
+    refute_path_exists strategy.cached_location
+  end
+
+
   private
 
   def new_strategy(url, cache: @cache, aliyunpan_executable: FAKE_CLI)

@@ -52,15 +52,28 @@ if [[ ${#args[@]} -gt 0 && "${args[0]}" == "download" ]]; then
 fi
 
 case "$mode" in
-  success)
+  success|nested)
+    # Real tickstep/aliyunpan v0.4.0 uses filepath.Join(saveto, f.Path),
+    # which keeps the cloud directory hierarchy under --saveto.
+    if [[ -z "$saveto" || -z "$path" ]]; then
+      echo "missing saveto or path" >&2
+      exit 2
+    fi
+    rel="${path#/}"
+    dest="$saveto/$rel"
+    mkdir -p "$(dirname "$dest")"
+    src="${FAKE_ALIYUNPAN_ARTIFACT:?}"
+    cp "$src" "$dest"
+    ;;
+  flat_decoy)
+    # Writes only a same-named file at the saveto root, not the nested path.
     if [[ -z "$saveto" || -z "$path" ]]; then
       echo "missing saveto or path" >&2
       exit 2
     fi
     mkdir -p "$saveto"
-    base="$(basename "$path")"
     src="${FAKE_ALIYUNPAN_ARTIFACT:?}"
-    cp "$src" "$saveto/$base"
+    cp "$src" "$saveto/$(basename "$path")"
     ;;
   exit0_missing)
     exit 0
