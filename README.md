@@ -13,6 +13,7 @@
 ```text
 /Software/mumuplayer/1.9.9/MuMuPlayer_Pro_1.9.9_app.tar.gz
 /Software/mumuplayer/1.9.9.forge/MuMuPlayer_Pro_1.9.9.forge_app.tar.gz
+/Software/IDA Pro/9.5/macOS-AppleSilicon/IDA_Professional_9.5_arm64_app.tar.gz
 ```
 
 ## 添加 tap 并安装
@@ -35,7 +36,14 @@ brew install --cask younglark/tap/mumuplayer@1.9.9.forge
 brew install --cask younglark/tap/mumuplayer@1.9.9
 ```
 
-详细说明见 [MUMUPLAYER-SETUP.md](MUMUPLAYER-SETUP.md) 和 [MUMUPLAYER-FORGE-SETUP.md](MUMUPLAYER-FORGE-SETUP.md)。
+详细说明见 [MUMUPLAYER-SETUP.md](MUMUPLAYER-SETUP.md)、[MUMUPLAYER-FORGE-SETUP.md](MUMUPLAYER-FORGE-SETUP.md) 和 [IDA-PRO-9.5-SETUP.md](IDA-PRO-9.5-SETUP.md)。
+
+IDA Professional 9.5（提取后的 arm64 应用包，需自备激活许可证）：
+
+```bash
+brew tap younglark/tap
+brew install --cask younglark/tap/ida-pro@9.5
+```
 
 ## 卸载
 
@@ -45,7 +53,7 @@ brew install --cask younglark/tap/mumuplayer@1.9.9
 brew uninstall --cask younglark/tap/mumuplayer@1.9.9
 ```
 
-只有加上 `--zap` 时，才会按配方中的 `zap trash` 列表删除相关支持文件，可能同时清掉其他 MuMu 版本共享的数据。
+只有加上 `--zap` 时，才会按配方中的 `zap trash` 列表删除相关支持文件，可能同时清掉其他 MuMu 版本共享的数据。`ida-pro@9.5` 没有 `zap`，卸载不会触碰 `~/.idapro`。
 
 ## 维护
 
@@ -67,4 +75,5 @@ ruby test/aliyunpan_download_strategy_test.rb
 ## 测试范围
 
 - 已在 Linux 上运行上述无网络自动化测试（成功下载、缓存、路径空格、缺少 CLI、未登录、非零退出、退出码 0 但缺文件、SHA-256 不一致、不修改账号/网盘/savedir、以及从 `.metadata` 路径加载策略）。
-- 本环境没有 Homebrew，也不是 macOS，因此**未做** `brew tap` / `brew install --cask` / 实际安装或运行 MuMuPlayer 的实测。
+- `ida-pro@9.5` 的自动化测试覆盖 Cask 结构、`IDA%20Pro` 路径解码、下载后的云盘层级路径，以及示例 `.app` 归档对可执行位与符号链接的保留。不把软件二进制放进仓库。
+- 本环境没有 Homebrew，也不是 macOS，因此**未做** `brew tap` / `brew install --cask` / 实际安装或运行 MuMuPlayer / IDA 的实测。IDA 归档只做过静态校验（版本、架构、权限、EULA），没有在 Mac 上启动。
