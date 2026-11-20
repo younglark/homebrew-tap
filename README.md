@@ -5,7 +5,7 @@
 ## 安装前准备
 
 1. 在 Apple silicon Mac 上安装 Homebrew。
-2. 安装 `aliyunpan` CLI（v0.4.0 或兼容版本），并把它放到 `PATH` 中。不要指望 `depends_on formula`：Homebrew 会先下载 Cask，再安装 formula 依赖。
+2. 安装 `aliyunpan` CLI（v0.4.0 或兼容版本）。用 Homebrew 安装时，二进制通常在 `$(brew --prefix)/bin/aliyunpan`。不要指望 `depends_on formula`：Homebrew 会先下载 Cask，再安装 formula 依赖。`brew install` 会精简 `PATH`，策略会另外查找 `HOMEBREW_PREFIX/bin` 和 `HOMEBREW_PATH`。若仍找不到，可在单次命令中指定绝对路径：`ALIYUNPAN="$(brew --prefix)/bin/aliyunpan" brew install --cask younglark/tap/mumuplayer@1.9.9.forge`。
 3. 运行 `aliyunpan login` 完成授权。`brew install` 过程中不会弹出登录。
 4. 确认当前网盘是**备份盘**（`aliyunpan who`）。配方不会写入 `driveId`，也不会切换你的网盘、账号或 `savedir`。
 5. 确认备份盘上已有对应归档，例如：

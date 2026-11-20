@@ -120,7 +120,7 @@ class AliyunpanDownloadStrategy < AbstractFileDownloadStrategy
       raise AliyunpanDownloadError, missing_cli_message(path)
     end
 
-    found = which_on_path("aliyunpan")
+    found = which_aliyunpan
     return found if found
 
     raise AliyunpanDownloadError, missing_cli_message("aliyunpan")
@@ -130,14 +130,34 @@ class AliyunpanDownloadStrategy < AbstractFileDownloadStrategy
     File.file?(path) && File.executable?(path)
   end
 
-  def which_on_path(name)
-    ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |dir|
-      next if dir.empty?
-
-      candidate = File.join(dir, name)
+  # brew install sanitizes ENV["PATH"] to Homebrew shims plus /usr/bin:/bin:/usr/sbin:/sbin,
+  # so a CLI installed into HOMEBREW_PREFIX/bin (or only present on the user's original
+  # PATH, saved as HOMEBREW_PATH) would otherwise be invisible.
+  def which_aliyunpan
+    candidate_directories.each do |dir|
+      candidate = File.join(dir, "aliyunpan")
       return candidate if executable_file?(candidate)
     end
     nil
+  end
+
+  def candidate_directories
+    dirs = []
+    dirs.concat(split_path_env("PATH"))
+    dirs.concat(homebrew_prefix_bindirs)
+    dirs.concat(split_path_env("HOMEBREW_PATH"))
+    dirs.uniq
+  end
+
+  def split_path_env(key)
+    ENV.fetch(key, "").split(File::PATH_SEPARATOR).reject(&:empty?)
+  end
+
+  def homebrew_prefix_bindirs
+    prefixes = []
+    prefixes << ENV["HOMEBREW_PREFIX"] unless ENV["HOMEBREW_PREFIX"].to_s.empty?
+    prefixes << HOMEBREW_PREFIX.to_s if defined?(HOMEBREW_PREFIX) && !HOMEBREW_PREFIX.to_s.empty?
+    prefixes.uniq.map { |prefix| File.join(prefix, "bin") }
   end
 
   def run_command(command, chdir:, timeout:)
@@ -174,9 +194,13 @@ class AliyunpanDownloadStrategy < AbstractFileDownloadStrategy
     <<~MSG
       The `aliyunpan` CLI was not found (looked for #{path}).
       Install tickstep/aliyunpan from https://github.com/tickstep/aliyunpan,
-      add it to PATH, and run `aliyunpan login` before `brew install`.
-      Homebrew formula dependencies are installed after a cask is fetched, so
-      this CLI must already be present; do not rely on `depends_on formula`.
+      make sure the binary is executable, and run `aliyunpan login` before
+      `brew install`. Homebrew sanitizes PATH during cask fetches, so this
+      strategy also looks in HOMEBREW_PREFIX/bin and HOMEBREW_PATH.
+      To override the lookup for one command, set ALIYUNPAN to the absolute
+      path of the `aliyunpan` binary. Homebrew formula dependencies are
+      installed after a cask is fetched, so this CLI must already be present;
+      do not rely on `depends_on formula`.
     MSG
   end
 end
