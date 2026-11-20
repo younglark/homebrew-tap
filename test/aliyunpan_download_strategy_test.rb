@@ -538,6 +538,142 @@ class AliyunpanDownloadStrategyTest < Minitest::Test
   end
 
 
+  PHOTOSHOP_CASK = "adobe-photoshop@27.5"
+  PHOTOSHOP_CLOUD_PATH = "/Software/Photoshop/27.5/macOS-AppleSilicon/Adobe_Photoshop_2026_27.5_app.tar.gz"
+  PHOTOSHOP_URL = "aliyunpan:///Software/Photoshop/27.5/macOS-AppleSilicon/Adobe_Photoshop_2026_27.5_app.tar.gz"
+  PHOTOSHOP_SHA256 = "bf27d96a8ba5249f96c53049622f1dbf15dab0c239319f636bb42c427d6a1907"
+
+  def test_photoshop_cask_structure_and_cloud_url
+    source = File.read(File.join(TAP_ROOT, "Casks", "#{PHOTOSHOP_CASK}.rb"))
+    assert_match(/cask "#{Regexp.escape(PHOTOSHOP_CASK)}" do/, source)
+    assert_includes source, 'Tap.fetch("younglark/tap")'
+    assert_match(/using: AliyunpanDownloadStrategy/, source)
+    assert_includes source, 'version "27.5"'
+    assert_includes source, PHOTOSHOP_SHA256
+    assert_includes source, 'aliyunpan:///Software/Photoshop/#{version}/macOS-AppleSilicon/Adobe_Photoshop_2026_#{version}_app.tar.gz'
+    assert_includes source, 'app "Adobe Photoshop 2026.app"'
+    assert_match(/depends_on macos: ">= :ventura"/, source)
+    refute_match(/^\s*zap\b/, source)
+    refute_match(/^\s*auto_updates\b/, source)
+    refute_match(/^\s*preflight\b/, source)
+    refute_match(/^\s*postflight\b/, source)
+    refute_match(/^\s*uninstall\b/, source)
+    refute_match(/^\s*installer\b/, source)
+    refute_match(/^\s*pkg\b/, source)
+    refute_match(/driveId/, source)
+    refute_match(/keygen|\\bcrack\\b|bypass|CoreInject|AntiCC/i, source)
+    refute_match(%r{/Users/|/home/box|/workspace/ps-app-extract}, source)
+    assert_match(/third-party|第三方/, source)
+    assert_match(/not been launched|has not been tested|未在 Mac/i, source)
+  end
+
+  def test_photoshop_cask_prelude_loads_via_tap_fetch_from_metadata_directory
+    metadata_dir = File.join(@tmpdir, "Caskroom", PHOTOSHOP_CASK, ".metadata", "27.5", "abc123")
+    FileUtils.mkdir_p(metadata_dir)
+    cask_src = File.join(TAP_ROOT, "Casks", "#{PHOTOSHOP_CASK}.rb")
+    FileUtils.cp(cask_src, File.join(metadata_dir, "#{PHOTOSHOP_CASK}.rb"))
+    refute_path_exists File.expand_path("../lib/aliyunpan_download_strategy.rb", metadata_dir)
+
+    prelude = File.read(cask_src)[/\A.*?(?=\ncask )/m]
+    refute_nil prelude
+    wrapper = File.join(metadata_dir, "load_prelude.rb")
+    File.write(wrapper, <<~RUBY)
+      require "digest"
+      require "fileutils"
+      require "pathname"
+      require "uri"
+
+      class AbstractDownloadStrategy
+        def initialize(*); end
+      end
+
+      class AbstractFileDownloadStrategy < AbstractDownloadStrategy
+      end
+
+      module Tap
+        def self.fetch(name)
+          raise "unexpected tap \#{name}" unless name == "younglark/tap"
+
+          Struct.new(:path).new(Pathname.new(#{TAP_ROOT.inspect}))
+        end
+      end
+
+      #{prelude}
+    RUBY
+
+    script = File.join(@tmpdir, "run_photoshop_metadata_load.rb")
+    File.write(script, <<~RUBY)
+      require "pathname"
+      load #{wrapper.inspect}
+      abort "strategy not defined" unless defined?(AliyunpanDownloadStrategy)
+      puts "loaded"
+    RUBY
+
+    output = IO.popen(["ruby", script], err: [:child, :out], &:read)
+    status = $CHILD_STATUS || $?
+    assert status.success?, output
+    assert_match(/loaded/, output)
+  end
+
+  def test_photoshop_cask_url_cloud_path
+    strategy = new_strategy(PHOTOSHOP_URL)
+    assert_equal PHOTOSHOP_CLOUD_PATH, strategy.send(:cloud_path)
+  end
+
+  def test_photoshop_fetch_uses_cloud_hierarchy_under_saveto
+    ENV["FAKE_ALIYUNPAN_MODE"] = "nested"
+    strategy = new_strategy(PHOTOSHOP_URL)
+    strategy.fetch
+
+    assert_path_exists strategy.cached_location
+    verify_sha256!(strategy.cached_location, FIXTURE_SHA256)
+    assert_equal "Adobe_Photoshop_2026_27.5_app.tar.gz", strategy.basename.to_s
+    assert_includes recorded_args_for_first_download, PHOTOSHOP_CLOUD_PATH
+    saveto = recorded_saveto
+    refute_nil saveto
+    assert_includes saveto, "aliyunpan-fetch-"
+  end
+
+  def test_photoshop_app_tarball_preserves_modes_and_symlinks
+    app_name = "Adobe Photoshop 2026.app"
+    src = File.join(@tmpdir, "ps-app-src")
+    macos = File.join(src, app_name, "Contents", "MacOS")
+    fw = File.join(src, app_name, "Contents", "Frameworks", "Example.framework")
+    FileUtils.mkdir_p(macos)
+    FileUtils.mkdir_p(File.join(fw, "Versions", "A"))
+    File.write(File.join(macos, "Adobe Photoshop 2026"), "fake-ps\n")
+    File.chmod(0o755, File.join(macos, "Adobe Photoshop 2026"))
+    File.write(File.join(macos, "InfoPlaceholder.txt"), "copyright\n")
+    File.chmod(0o644, File.join(macos, "InfoPlaceholder.txt"))
+    File.write(File.join(fw, "Versions", "A", "Example"), "fake-fw\n")
+    File.chmod(0o644, File.join(fw, "Versions", "A", "Example"))
+    File.symlink("A", File.join(fw, "Versions", "Current"))
+    File.symlink("Versions/Current/Example", File.join(fw, "Example"))
+
+    archive = File.join(@tmpdir, "Adobe_Photoshop_2026_27.5_app.tar.gz")
+    assert system("tar", "-C", src, "-czf", archive, app_name), "failed to create fixture tarball"
+
+    dest = File.join(@tmpdir, "ps-app-out")
+    FileUtils.mkdir_p(dest)
+    assert system("tar", "-C", dest, "-xzf", archive), "failed to extract fixture tarball"
+
+    exe = File.join(dest, app_name, "Contents", "MacOS", "Adobe Photoshop 2026")
+    copy = File.join(dest, app_name, "Contents", "MacOS", "InfoPlaceholder.txt")
+    current = File.join(dest, app_name, "Contents", "Frameworks", "Example.framework", "Versions", "Current")
+    fwbin = File.join(dest, app_name, "Contents", "Frameworks", "Example.framework", "Example")
+    assert File.executable?(exe), "expected main executable to remain executable"
+    assert_equal 0o755, File.stat(exe).mode & 0o777
+    assert_equal 0o644, File.stat(copy).mode & 0o777
+    refute File.executable?(copy)
+    assert File.symlink?(current)
+    assert_equal "A", File.readlink(current)
+    assert File.symlink?(fwbin)
+    assert File.exist?(fwbin)
+    assert_equal "fake-fw\n", File.read(fwbin)
+  end
+
+
+
   private
 
   def new_strategy(url, cache: @cache, aliyunpan_executable: FAKE_CLI)
