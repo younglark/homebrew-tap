@@ -271,6 +271,98 @@ class AliyunpanDownloadStrategyTest < Minitest::Test
     end
   end
 
+  # Reproduces the failure seen on macOS: brew sanitizes ENV["PATH"] to its
+  # shims plus the default Unix path, so /opt/homebrew/bin is missing even
+  # though aliyunpan is installed there (often as a Cellar symlink).
+  def test_finds_cli_in_homebrew_prefix_when_brew_sanitizes_path
+    prefix = File.join(@tmpdir, "opt", "homebrew")
+    cellar = File.join(prefix, "Cellar", "aliyunpan", "0.4.0", "bin")
+    FileUtils.mkdir_p(cellar)
+    FileUtils.mkdir_p(File.join(prefix, "bin"))
+    FileUtils.mkdir_p(File.join(prefix, "Library", "Homebrew", "shims", "shared"))
+    target = File.join(cellar, "aliyunpan")
+    FileUtils.cp(FAKE_CLI, target)
+    FileUtils.chmod(0o755, target)
+    File.symlink("../Cellar/aliyunpan/0.4.0/bin/aliyunpan", File.join(prefix, "bin", "aliyunpan"))
+
+    with_env(
+      "PATH" => "#{File.join(prefix, "Library", "Homebrew", "shims", "shared")}:/usr/bin:/bin:/usr/sbin:/sbin",
+      "HOMEBREW_PREFIX" => prefix,
+      "HOMEBREW_PATH" => "#{File.join(@tmpdir, "user-bin")}:/usr/bin:/bin:#{File.join(prefix, "bin")}",
+      "ALIYUNPAN" => nil,
+    ) do
+      strategy = AliyunpanDownloadStrategy.new(
+        "aliyunpan:///Software/mumuplayer/1.9.9/MuMuPlayer_Pro_1.9.9_app.tar.gz",
+        "mumuplayer",
+        "1.9.9",
+        cache: @cache,
+      )
+      strategy.fetch
+    end
+
+    downloaded = Dir.glob(File.join(@cache, "downloads", "*"))
+                    .reject { |path| path.end_with?(".incomplete") }
+    refute_empty downloaded
+    verify_sha256!(downloaded.fetch(0), FIXTURE_SHA256)
+    assert_equal ["download"], recorded_subcommands
+  end
+
+  def test_aliyunpan_env_overrides_sanitized_path
+    prefix = File.join(@tmpdir, "opt", "homebrew")
+    FileUtils.mkdir_p(File.join(prefix, "bin"))
+    override = File.join(@tmpdir, "explicit-aliyunpan")
+    FileUtils.cp(FAKE_CLI, override)
+    FileUtils.chmod(0o755, override)
+
+    with_env(
+      "PATH" => "/usr/bin:/bin:/usr/sbin:/sbin",
+      "HOMEBREW_PREFIX" => prefix,
+      "HOMEBREW_PATH" => "/usr/bin:/bin",
+      "ALIYUNPAN" => override,
+    ) do
+      strategy = AliyunpanDownloadStrategy.new(
+        "aliyunpan:///Software/mumuplayer/1.9.9/MuMuPlayer_Pro_1.9.9_app.tar.gz",
+        "mumuplayer",
+        "1.9.9",
+        cache: @cache,
+      )
+      strategy.fetch
+    end
+
+    assert_equal ["download"], recorded_subcommands
+    verify_sha256!(
+      Dir.glob(File.join(@cache, "downloads", "*")).reject { |path| path.end_with?(".incomplete") }.fetch(0),
+      FIXTURE_SHA256,
+    )
+  end
+
+  def test_finds_cli_on_homebrew_path_outside_prefix
+    user_bin = File.join(@tmpdir, "user local", "bin")
+    FileUtils.mkdir_p(user_bin)
+    FileUtils.cp(FAKE_CLI, File.join(user_bin, "aliyunpan"))
+    FileUtils.chmod(0o755, File.join(user_bin, "aliyunpan"))
+    prefix = File.join(@tmpdir, "opt", "homebrew")
+    FileUtils.mkdir_p(File.join(prefix, "bin"))
+
+    with_env(
+      "PATH" => "/usr/bin:/bin:/usr/sbin:/sbin",
+      "HOMEBREW_PREFIX" => prefix,
+      "HOMEBREW_PATH" => "#{user_bin}:/usr/bin:/bin",
+      "ALIYUNPAN" => nil,
+    ) do
+      strategy = AliyunpanDownloadStrategy.new(
+        "aliyunpan:///Software/mumuplayer/1.9.9/MuMuPlayer_Pro_1.9.9_app.tar.gz",
+        "mumuplayer",
+        "1.9.9",
+        cache: @cache,
+      )
+      strategy.fetch
+    end
+
+    assert_equal ["download"], recorded_subcommands
+  end
+
+
   private
 
   def new_strategy(url, cache: @cache, aliyunpan_executable: FAKE_CLI)
@@ -318,6 +410,28 @@ class AliyunpanDownloadStrategyTest < Minitest::Test
     return nil unless index
 
     args[index + 1]
+  end
+
+
+  def with_env(vars)
+    previous = {}
+    vars.each do |key, value|
+      previous[key] = ENV.key?(key) ? ENV[key] : :__unset__
+      if value.nil?
+        ENV.delete(key)
+      else
+        ENV[key] = value
+      end
+    end
+    yield
+  ensure
+    previous.each do |key, value|
+      if value == :__unset__
+        ENV.delete(key)
+      else
+        ENV[key] = value
+      end
+    end
   end
 
   def leftover_work_dirs?
