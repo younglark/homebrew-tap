@@ -1,3 +1,70 @@
 # homebrew-tap
 
-Shared Homebrew tap for macOS applications and command-line tools
+内部使用的 macOS Homebrew tap。仓库可以公开，但 Cask 安装包从你自己的阿里云盘拉取，执行 `brew install` 的机器需要已安装并登录 [tickstep/aliyunpan](https://github.com/tickstep/aliyunpan)。外人即使看到配方，没有你的登录会话也下不到文件。
+
+## 安装前准备
+
+1. 在 Apple silicon Mac 上安装 Homebrew。
+2. 安装 `aliyunpan` CLI（v0.4.0 或兼容版本），并把它放到 `PATH` 中。不要指望 `depends_on formula`：Homebrew 会先下载 Cask，再安装 formula 依赖。
+3. 运行 `aliyunpan login` 完成授权。`brew install` 过程中不会弹出登录。
+4. 确认当前网盘是**备份盘**（`aliyunpan who`）。配方不会写入 `driveId`，也不会切换你的网盘、账号或 `savedir`。
+5. 确认备份盘上已有对应归档，例如：
+
+```text
+/Software/mumuplayer/1.9.9/MuMuPlayer_Pro_1.9.9_app.tar.gz
+/Software/mumuplayer/1.9.9.forge/MuMuPlayer_Pro_1.9.9.forge_app.tar.gz
+```
+
+## 添加 tap 并安装
+
+```bash
+brew tap younglark/tap
+brew install --cask younglark/tap/mumuplayer@1.9.9
+```
+
+Forge 版本：
+
+```bash
+brew tap younglark/tap
+brew install --cask younglark/tap/mumuplayer@1.9.9.forge
+```
+
+`brew tap younglark/tap` 会克隆本仓库 `younglark/homebrew-tap`。也可以一次完成：
+
+```bash
+brew install --cask younglark/tap/mumuplayer@1.9.9
+```
+
+详细说明见 [MUMUPLAYER-SETUP.md](MUMUPLAYER-SETUP.md) 和 [MUMUPLAYER-FORGE-SETUP.md](MUMUPLAYER-FORGE-SETUP.md)。
+
+## 卸载
+
+普通卸载只移除应用，不删除用户数据：
+
+```bash
+brew uninstall --cask younglark/tap/mumuplayer@1.9.9
+```
+
+只有加上 `--zap` 时，才会按配方中的 `zap trash` 列表删除相关支持文件，可能同时清掉其他 MuMu 版本共享的数据。
+
+## 维护
+
+发布或更新归档时：
+
+1. 把 `MuMuPlayer_Pro_<version>_app.tar.gz` 放到备份盘 `/Software/mumuplayer/<version>/`。不要把包放在网盘根目录，也不要在仓库里创建公开分享直链。
+2. 计算 SHA-256（`shasum -a 256` 或 `sha256sum`），写入对应 Cask 的 `sha256`。
+3. 云盘路径已经由 URL 模板 `aliyunpan:///Software/mumuplayer/#{version}/MuMuPlayer_Pro_#{version}_app.tar.gz` 生成；新版本一般只需复制 Cask、改 `version` / `sha256` / 描述。
+4. 自定义下载策略在 `lib/aliyunpan_download_strategy.rb`。Cask 必须通过 `Tap.fetch("younglark/tap")` 加载它，不要改回 `require_relative`：Homebrew 会把 Cask 复制到 Caskroom 的 `.metadata`，相对路径会失效。
+5. 不要在公开配方中写入 `driveId`、令牌、配置路径或个人联系方式。
+6. 修改策略后运行：
+
+```bash
+ruby test/aliyunpan_download_strategy_test.rb
+```
+
+测试使用假 CLI，不访问网络，也不会改动本机 `aliyunpan` 配置。
+
+## 测试范围
+
+- 已在 Linux 上运行上述无网络自动化测试（成功下载、缓存、路径空格、缺少 CLI、未登录、非零退出、退出码 0 但缺文件、SHA-256 不一致、不修改账号/网盘/savedir、以及从 `.metadata` 路径加载策略）。
+- 本环境没有 Homebrew，也不是 macOS，因此**未做** `brew tap` / `brew install --cask` / 实际安装或运行 MuMuPlayer 的实测。

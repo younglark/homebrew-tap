@@ -1,0 +1,5 @@
+.DS_Store
+*.iso
+# Keep test fixtures; ignore accidental local archives.
+/*.tar.gz
+/tmp/

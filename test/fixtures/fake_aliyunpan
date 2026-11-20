@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Test double for tickstep/aliyunpan. Performs no network I/O and never logs in.
+set -euo pipefail
+
+log="${FAKE_ALIYUNPAN_LOG:?}"
+{
+  printf '%s\n' "argc=$#"
+  i=0
+  for a in "$@"; do
+    printf '%s\n' "arg${i}=${a}"
+    i=$((i + 1))
+  done
+  printf '%s\n' '---'
+} >> "$log"
+
+if [[ $# -ge 1 ]]; then
+  case "$1" in
+    login|logout|su|drive|config|cd|share)
+      echo "unexpected command: $1" >&2
+      exit 99
+      ;;
+  esac
+fi
+
+mode="${FAKE_ALIYUNPAN_MODE:-success}"
+saveto=""
+path=""
+args=("$@")
+if [[ ${#args[@]} -gt 0 && "${args[0]}" == "download" ]]; then
+  i=1
+  while [[ $i -lt ${#args[@]} ]]; do
+    case "${args[$i]}" in
+      --saveto)
+        i=$((i + 1))
+        saveto="${args[$i]}"
+        ;;
+      --np|--ow|--status|--nocheck|--save|--md|--ui)
+        ;;
+      --driveId|--retry|--sp|-p|--exn)
+        i=$((i + 1))
+        ;;
+      --*)
+        echo "unexpected option: ${args[$i]}" >&2
+        exit 98
+        ;;
+      *)
+        path="${args[$i]}"
+        ;;
+    esac
+    i=$((i + 1))
+  done
+fi
+
+case "$mode" in
+  success)
+    if [[ -z "$saveto" || -z "$path" ]]; then
+      echo "missing saveto or path" >&2
+      exit 2
+    fi
+    mkdir -p "$saveto"
+    base="$(basename "$path")"
+    src="${FAKE_ALIYUNPAN_ARTIFACT:?}"
+    cp "$src" "$saveto/$base"
+    ;;
+  exit0_missing)
+    exit 0
+    ;;
+  fail)
+    echo "文件不存在: ${path:-unknown}" >&2
+    exit 1
+    ;;
+  not_logged_in)
+    echo "未登录账号" >&2
+    exit 1
+    ;;
+  *)
+    echo "unknown fake mode: $mode" >&2
+    exit 97
+    ;;
+esac

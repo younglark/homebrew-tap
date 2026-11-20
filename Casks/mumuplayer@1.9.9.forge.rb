@@ -1,8 +1,20 @@
+# frozen_string_literal: true
+
+# Load from the tap path, not relative to this file. Homebrew copies casks
+# into Caskroom .metadata, where require_relative "../lib/..." would fail.
+strategy_path = if defined?(Tap)
+  Tap.fetch("younglark/tap").path/"lib/aliyunpan_download_strategy.rb"
+else
+  File.expand_path("../lib/aliyunpan_download_strategy.rb", __dir__)
+end
+require strategy_path.to_s
+
 cask "mumuplayer@1.9.9.forge" do
   version "1.9.9.forge"
   sha256 "d8dc31ac08f69f459f651a032dcc24fc92407071dc7aa259ed5c35a254c4e21d"
 
-  url "https://younglark.synology.me:1443/api/packages/root/generic/mumuplayer/#{version}/MuMuPlayer_Pro_#{version}_app.tar.gz"
+  url "aliyunpan:///Software/mumuplayer/#{version}/MuMuPlayer_Pro_#{version}_app.tar.gz",
+      using: AliyunpanDownloadStrategy
   name "MuMuPlayer"
   desc "Netease MuMu Player 1.9.9 with reconstructed libmumu and Frida"
   homepage "https://mumu.163.com/mac/"
