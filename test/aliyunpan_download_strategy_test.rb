@@ -1,0 +1,326 @@
+# frozen_string_literal: true
+
+# Seams under test (agreed by the implementation brief):
+# 1. AliyunpanDownloadStrategy#fetch public interface: writes a complete
+#    artifact to cached_location with a basename/extension Homebrew can unpack.
+# 2. Failure modes: missing CLI, not logged in, non-zero exit, exit 0 without
+#    a file, SHA-256 mismatch in a Homebrew-like verifier, leftover cleanup.
+# 3. Cache reuse, paths containing spaces, and no mutation of aliyunpan
+#    savedir / current drive / account (only `download` is invoked).
+# 4. Cask prelude loading via Tap.fetch, which must work when the cask is
+#    copied into Homebrew's .metadata directory (require_relative would break).
+
+require_relative "test_helper"
+
+class AliyunpanDownloadStrategyTest < Minitest::Test
+  def setup
+    @tmpdir = Dir.mktmpdir("aliyunpan-strategy-test-")
+    @cache = File.join(@tmpdir, "cache")
+    @log = File.join(@tmpdir, "cli.log")
+    @artifact = File.join(@tmpdir, "artifact.tar.gz")
+    File.write(@artifact, FIXTURE_BODY)
+    ENV["FAKE_ALIYUNPAN_LOG"] = @log
+    ENV["FAKE_ALIYUNPAN_MODE"] = "success"
+    ENV["FAKE_ALIYUNPAN_ARTIFACT"] = @artifact
+    @previous_tmpdir = ENV["TMPDIR"]
+    tmpdir = File.join(@tmpdir, "tmp")
+    FileUtils.mkdir_p(tmpdir)
+    ENV["TMPDIR"] = tmpdir
+  end
+
+  def teardown
+    if defined?(@previous_tmpdir) && @previous_tmpdir
+      ENV["TMPDIR"] = @previous_tmpdir
+    else
+      ENV.delete("TMPDIR")
+    end
+    %w[FAKE_ALIYUNPAN_LOG FAKE_ALIYUNPAN_MODE FAKE_ALIYUNPAN_ARTIFACT].each do |key|
+      ENV.delete(key)
+    end
+    FileUtils.remove_entry(@tmpdir) if @tmpdir && File.directory?(@tmpdir)
+  end
+
+  def test_fetch_writes_cached_tarball_and_passes_checksum
+    url = "aliyunpan:///Software/mumuplayer/1.9.9/MuMuPlayer_Pro_1.9.9_app.tar.gz"
+    strategy = new_strategy(url)
+
+    strategy.fetch
+
+    assert_path_exists strategy.cached_location
+    assert_predicate strategy.cached_location, :file?
+    assert strategy.cached_location.to_s.end_with?(".tar.gz"),
+           "cached_location must keep the .tar.gz extension for unpack detection: #{strategy.cached_location}"
+    assert_equal "MuMuPlayer_Pro_1.9.9_app.tar.gz", strategy.basename.to_s
+    verify_sha256!(strategy.cached_location, FIXTURE_SHA256)
+    refute_path_exists strategy.temporary_path
+    assert_equal ["download"], recorded_subcommands
+    assert_includes recorded_args_for_first_download, "--saveto"
+    assert_includes recorded_args_for_first_download, "--np"
+    assert_includes recorded_args_for_first_download,
+                    "/Software/mumuplayer/1.9.9/MuMuPlayer_Pro_1.9.9_app.tar.gz"
+    refute_includes recorded_args_for_first_download, "--driveId"
+  end
+
+  def test_fetch_reuses_cache_and_does_not_invoke_cli_again
+    url = "aliyunpan:///Software/mumuplayer/1.9.9/MuMuPlayer_Pro_1.9.9_app.tar.gz"
+    strategy = new_strategy(url)
+    strategy.fetch
+    first_calls = recorded_download_count
+
+    ENV["FAKE_ALIYUNPAN_MODE"] = "fail"
+    strategy.fetch
+
+    assert_equal first_calls, recorded_download_count
+    verify_sha256!(strategy.cached_location, FIXTURE_SHA256)
+  end
+
+  def test_fetch_supports_spaces_in_cache_and_cloud_paths
+    cache = File.join(@tmpdir, "cache dir with spaces")
+    tmpdir = File.join(@tmpdir, "tmp dir with spaces")
+    FileUtils.mkdir_p(tmpdir)
+    url = "aliyunpan:///Software/my%20files/foo%20bar.tar.gz"
+    strategy = new_strategy(url, cache: cache)
+    previous_tmpdir = ENV["TMPDIR"]
+    ENV["TMPDIR"] = tmpdir
+
+    begin
+      strategy.fetch
+    ensure
+      if previous_tmpdir
+        ENV["TMPDIR"] = previous_tmpdir
+      else
+        ENV.delete("TMPDIR")
+      end
+    end
+
+    assert_path_exists strategy.cached_location
+    assert_includes strategy.cached_location.to_s, "cache dir with spaces"
+    assert strategy.cached_location.to_s.end_with?("foo bar.tar.gz"),
+           strategy.cached_location.to_s
+    assert_equal "foo bar.tar.gz", strategy.basename.to_s
+    verify_sha256!(strategy.cached_location, FIXTURE_SHA256)
+    assert_includes recorded_args_for_first_download, "/Software/my files/foo bar.tar.gz"
+    saveto = recorded_saveto
+    refute_nil saveto
+    assert_includes saveto, " ", "expected --saveto to work with a path that may contain spaces"
+    assert_includes saveto, tmpdir
+  end
+
+  def test_missing_cli_raises_friendly_error_without_interactive_login
+    url = "aliyunpan:///Software/mumuplayer/1.9.9/MuMuPlayer_Pro_1.9.9_app.tar.gz"
+    missing = File.join(@tmpdir, "no-such-aliyunpan")
+    strategy = new_strategy(url, aliyunpan_executable: missing)
+
+    error = assert_raises(AliyunpanDownloadError) { strategy.fetch }
+    assert_match(/aliyunpan/i, error.message)
+    assert_match(/PATH|install/i, error.message)
+    refute_match(/please wait|scan|二维码|qr code/i, error.message)
+    refute_path_exists strategy.cached_location
+    refute_path_exists strategy.temporary_path
+    refute_path_exists @log
+  end
+
+  def test_not_logged_in_raises_friendly_error_and_does_not_start_login
+    ENV["FAKE_ALIYUNPAN_MODE"] = "not_logged_in"
+    strategy = new_strategy("aliyunpan:///Software/mumuplayer/1.9.9/MuMuPlayer_Pro_1.9.9_app.tar.gz")
+
+    error = assert_raises(AliyunpanDownloadError) { strategy.fetch }
+    assert_match(/login/i, error.message)
+    refute_match(/will now run|starting login|aliyunpan login now/i, error.message)
+    refute_includes recorded_subcommands, "login"
+    refute_path_exists strategy.cached_location
+    refute_path_exists strategy.temporary_path
+  end
+
+  def test_nonzero_exit_does_not_leave_partial_cache
+    ENV["FAKE_ALIYUNPAN_MODE"] = "fail"
+    strategy = new_strategy("aliyunpan:///Software/mumuplayer/1.9.9/MuMuPlayer_Pro_1.9.9_app.tar.gz")
+
+    error = assert_raises(AliyunpanDownloadError) { strategy.fetch }
+    assert_match(/文件不存在|download failed|failed/i, error.message)
+    refute_path_exists strategy.cached_location
+    refute_path_exists strategy.temporary_path
+    refute leftover_work_dirs?
+  end
+
+  def test_exit_zero_without_file_is_a_failure
+    ENV["FAKE_ALIYUNPAN_MODE"] = "exit0_missing"
+    strategy = new_strategy("aliyunpan:///Software/mumuplayer/1.9.9/MuMuPlayer_Pro_1.9.9_app.tar.gz")
+
+    error = assert_raises(AliyunpanDownloadError) { strategy.fetch }
+    assert_match(/exit(?:ed)? 0|did not write|not (?:found|saved|written)/i, error.message)
+    refute_path_exists strategy.cached_location
+    refute_path_exists strategy.temporary_path
+    refute leftover_work_dirs?
+  end
+
+  def test_checksum_mismatch_is_detected_by_homebrew_like_verifier
+    url = "aliyunpan:///Software/mumuplayer/1.9.9/MuMuPlayer_Pro_1.9.9_app.tar.gz"
+    File.write(@artifact, "not-the-official-archive\n")
+    strategy = new_strategy(url)
+    strategy.fetch
+
+    error = assert_raises(RuntimeError) do
+      verify_sha256!(strategy.cached_location, FIXTURE_SHA256)
+    end
+    assert_match(/SHA256 mismatch/, error.message)
+  end
+
+  def test_fetch_does_not_change_savedir_drive_or_account
+    strategy = new_strategy("aliyunpan:///Software/mumuplayer/1.9.9/MuMuPlayer_Pro_1.9.9_app.tar.gz")
+    strategy.fetch
+
+    assert_equal ["download"], recorded_subcommands
+    recorded_arg_lines.each do |line|
+      refute_match(/\b(login|logout|su|drive|config|cd|share)\b/, line)
+    end
+  end
+
+  def test_strategy_is_a_homebrew_download_strategy_subclass
+    assert AliyunpanDownloadStrategy < AbstractDownloadStrategy
+    assert AliyunpanDownloadStrategy < AbstractFileDownloadStrategy
+  end
+
+  def test_cask_prelude_loads_via_tap_fetch_from_metadata_directory
+    metadata_dir = File.join(@tmpdir, "Caskroom", "mumuplayer@1.9.9", ".metadata", "1.9.9", "abc123")
+    FileUtils.mkdir_p(metadata_dir)
+    cask_src = File.join(TAP_ROOT, "Casks", "mumuplayer@1.9.9.rb")
+    copied = File.join(metadata_dir, "mumuplayer@1.9.9.rb")
+    FileUtils.cp(cask_src, copied)
+
+    # require_relative from the cached copy would miss the tap's lib/.
+    refute_path_exists File.expand_path("../lib/aliyunpan_download_strategy.rb", metadata_dir)
+
+    prelude = File.read(copied)[/\A.*?(?=\ncask )/m]
+    refute_nil prelude
+    assert_match(/Tap\.fetch\("younglark\/tap"\)/, prelude)
+
+    # Homebrew has already loaded AbstractFileDownloadStrategy when it
+    # evaluates a cask. The prelude must still find the tap lib from a
+    # .metadata copy, where require_relative would fail.
+    wrapper = File.join(metadata_dir, "load_prelude.rb")
+    File.write(wrapper, <<~RUBY)
+      require "digest"
+      require "fileutils"
+      require "pathname"
+      require "uri"
+
+      class AbstractDownloadStrategy
+        def initialize(*); end
+      end
+
+      class AbstractFileDownloadStrategy < AbstractDownloadStrategy
+      end
+
+      module Tap
+        def self.fetch(name)
+          raise "unexpected tap \#{name}" unless name == "younglark/tap"
+
+          Struct.new(:path).new(Pathname.new(#{TAP_ROOT.inspect}))
+        end
+      end
+
+      #{prelude}
+    RUBY
+
+    # Isolate from already-loaded constants by spawning a subprocess without the test helper parent.
+    script = File.join(@tmpdir, "run_metadata_load.rb")
+    File.write(script, <<~RUBY)
+      require "pathname"
+      load #{wrapper.inspect}
+      abort "strategy not defined" unless defined?(AliyunpanDownloadStrategy)
+      puts "loaded"
+    RUBY
+
+    output = IO.popen(["ruby", script], err: [:child, :out], &:read)
+    status = $CHILD_STATUS || $?
+    assert status.success?, output
+    assert_match(/loaded/, output)
+  end
+
+  def test_casks_keep_install_semantics_and_use_cloud_paths
+    %w[mumuplayer@1.9.9 mumuplayer@1.9.9.forge].each do |token|
+      source = File.read(File.join(TAP_ROOT, "Casks", "#{token}.rb"))
+      assert_match(/cask "#{Regexp.escape(token)}" do/, source)
+      assert_match(/app "MuMuPlayer\.app"/, source)
+      assert_match(/depends_on arch: :arm64/, source)
+      assert_match(/depends_on macos: :big_sur/, source)
+      assert_match(/using: AliyunpanDownloadStrategy/, source)
+      assert_match(%r{url "aliyunpan:///Software/mumuplayer/#\{version\}/MuMuPlayer_Pro_#\{version\}_app\.tar\.gz"}, source)
+      refute_match(/driveId/, source)
+      refute_match(/depends_on formula:/, source)
+      refute_match(/^\s*auto_updates\b/, source)
+      assert_includes source, 'Tap.fetch("younglark/tap")'
+      if token == "mumuplayer@1.9.9"
+        assert_includes source, "1d1a27907dbcc7270e0f925c816c291dbd3f21c0bc96aab05d1296fa93b5f440"
+      else
+        assert_includes source, "d8dc31ac08f69f459f651a032dcc24fc92407071dc7aa259ed5c35a254c4e21d"
+      end
+      %w[
+        ~/Library/Application Scripts/*.group.com.netease.mumu.nemux
+        ~/Library/Application Support/com.netease.mumu.nemux
+        ~/Library/Caches/com.netease.mumu.nemux*
+        ~/Library/Group Containers/*.group.com.netease.mumu.nemux
+        ~/Library/HTTPStorages/com.netease.mumu.nemux*
+        ~/Library/Preferences/*.netease.mumu*.plist
+        ~/Library/Saved Application State/com.netease.mumu.nemux*.savedState
+        ~/Library/WebKit/com.netease.mumu.nemux*
+      ].each do |entry|
+        assert_includes source, entry
+      end
+    end
+  end
+
+  private
+
+  def new_strategy(url, cache: @cache, aliyunpan_executable: FAKE_CLI)
+    AliyunpanDownloadStrategy.new(
+      url,
+      "mumuplayer",
+      "1.9.9",
+      cache: cache,
+      aliyunpan_executable: aliyunpan_executable,
+    )
+  end
+
+  def recorded_arg_lines
+    return [] unless File.file?(@log)
+
+    File.read(@log).split("\n")
+  end
+
+  def recorded_subcommands
+    recorded_arg_lines.filter_map { |line| line[/^arg0=(.*)$/, 1] }
+  end
+
+  def recorded_download_count
+    recorded_subcommands.count("download")
+  end
+
+  def recorded_args_for_first_download
+    lines = recorded_arg_lines
+    start = lines.index { |line| line == "arg0=download" }
+    return [] unless start
+
+    args = []
+    lines[start..].each do |line|
+      break if line == "---"
+
+      match = line.match(/^arg(\d+)=(.*)$/)
+      args[Integer(match[1])] = match[2] if match
+    end
+    args
+  end
+
+  def recorded_saveto
+    args = recorded_args_for_first_download
+    index = args.index("--saveto")
+    return nil unless index
+
+    args[index + 1]
+  end
+
+  def leftover_work_dirs?
+    Dir.glob(File.join(Dir.tmpdir, "aliyunpan-fetch-*")).any?
+  end
+end
