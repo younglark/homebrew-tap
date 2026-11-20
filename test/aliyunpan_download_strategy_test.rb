@@ -400,6 +400,144 @@ class AliyunpanDownloadStrategyTest < Minitest::Test
   end
 
 
+
+  IDA_PRO_CASK = "ida-pro@9.5"
+  IDA_PRO_CLOUD_PATH = "/Software/IDA Pro/9.5/macOS-AppleSilicon/IDA_Professional_9.5_arm64_app.tar.gz"
+  IDA_PRO_URL = "aliyunpan:///Software/IDA%20Pro/9.5/macOS-AppleSilicon/IDA_Professional_9.5_arm64_app.tar.gz"
+  IDA_PRO_SHA256 = "54e87281c6640fd5cb146f0b1a0895766a4f895de48c05497843bf7991490b3d"
+
+  def test_ida_pro_cask_structure_and_cloud_url
+    source = File.read(File.join(TAP_ROOT, "Casks", "#{IDA_PRO_CASK}.rb"))
+    assert_match(/cask "#{Regexp.escape(IDA_PRO_CASK)}" do/, source)
+    assert_includes source, 'Tap.fetch("younglark/tap")'
+    assert_match(/using: AliyunpanDownloadStrategy/, source)
+    assert_includes source, 'version "9.5"'
+    assert_includes source, IDA_PRO_SHA256
+    assert_includes source, 'aliyunpan:///Software/IDA%20Pro/#{version}/macOS-AppleSilicon/IDA_Professional_#{version}_arm64_app.tar.gz'
+    assert_match(/app "IDA Professional #\{version\}\.app"/, source)
+    assert_match(/depends_on arch: :arm64/, source)
+    assert_match(/depends_on macos: ">= :monterey"/, source)
+    refute_match(/^\s*zap\b/, source)
+    refute_match(/^\s*auto_updates\b/, source)
+    refute_match(/driveId/, source)
+    refute_match(/keygen|\\bcrack\\b|bypass/i, source)
+    assert_match(/ida\.hexlic/, source)
+    refute_match(%r{/Users/|/home/box|/workspace/ida95}, source)
+    refute_match(/aliyunpan:\/\/\/Software\/IDA Pro\//, source)
+    assert_match(/IDA%20Pro/, source)
+  end
+
+  def test_ida_pro_cask_prelude_loads_via_tap_fetch_from_metadata_directory
+    metadata_dir = File.join(@tmpdir, "Caskroom", IDA_PRO_CASK, ".metadata", "9.5", "abc123")
+    FileUtils.mkdir_p(metadata_dir)
+    cask_src = File.join(TAP_ROOT, "Casks", "#{IDA_PRO_CASK}.rb")
+    FileUtils.cp(cask_src, File.join(metadata_dir, "#{IDA_PRO_CASK}.rb"))
+    refute_path_exists File.expand_path("../lib/aliyunpan_download_strategy.rb", metadata_dir)
+
+    prelude = File.read(cask_src)[/\A.*?(?=\ncask )/m]
+    refute_nil prelude
+    wrapper = File.join(metadata_dir, "load_prelude.rb")
+    File.write(wrapper, <<~RUBY)
+      require "digest"
+      require "fileutils"
+      require "pathname"
+      require "uri"
+
+      class AbstractDownloadStrategy
+        def initialize(*); end
+      end
+
+      class AbstractFileDownloadStrategy < AbstractDownloadStrategy
+      end
+
+      module Tap
+        def self.fetch(name)
+          raise "unexpected tap \#{name}" unless name == "younglark/tap"
+
+          Struct.new(:path).new(Pathname.new(#{TAP_ROOT.inspect}))
+        end
+      end
+
+      #{prelude}
+    RUBY
+
+    script = File.join(@tmpdir, "run_ida_metadata_load.rb")
+    File.write(script, <<~RUBY)
+      require "pathname"
+      load #{wrapper.inspect}
+      abort "strategy not defined" unless defined?(AliyunpanDownloadStrategy)
+      puts "loaded"
+    RUBY
+
+    output = IO.popen(["ruby", script], err: [:child, :out], &:read)
+    status = $CHILD_STATUS || $?
+    assert status.success?, output
+    assert_match(/loaded/, output)
+  end
+
+  def test_ida_pro_cask_url_decodes_spaces_in_cloud_path
+    strategy = new_strategy(IDA_PRO_URL)
+    assert_equal IDA_PRO_CLOUD_PATH, strategy.send(:cloud_path)
+
+    error = assert_raises(URI::InvalidURIError) do
+      new_strategy("aliyunpan:///Software/IDA Pro/9.5/macOS-AppleSilicon/IDA_Professional_9.5_arm64_app.tar.gz").send(:cloud_path)
+    end
+    assert_match(/bad URI|is not URI/i, error.message)
+  end
+
+  def test_ida_pro_fetch_uses_decoded_cloud_hierarchy_under_saveto
+    ENV["FAKE_ALIYUNPAN_MODE"] = "nested"
+    strategy = new_strategy(IDA_PRO_URL)
+    strategy.fetch
+
+    assert_path_exists strategy.cached_location
+    verify_sha256!(strategy.cached_location, FIXTURE_SHA256)
+    assert_equal "IDA_Professional_9.5_arm64_app.tar.gz", strategy.basename.to_s
+    assert_includes recorded_args_for_first_download, IDA_PRO_CLOUD_PATH
+    saveto = recorded_saveto
+    refute_nil saveto
+    assert_includes saveto, "aliyunpan-fetch-"
+  end
+
+  def test_ida_pro_app_tarball_preserves_modes_and_symlinks
+    app_name = "IDA Professional 9.5.app"
+    src = File.join(@tmpdir, "app-src")
+    macos = File.join(src, app_name, "Contents", "MacOS")
+    fw = File.join(src, app_name, "Contents", "Frameworks", "QtCore.framework")
+    FileUtils.mkdir_p(macos)
+    FileUtils.mkdir_p(File.join(fw, "Versions", "A"))
+    File.write(File.join(macos, "ida"), "fake-ida\n")
+    File.chmod(0o755, File.join(macos, "ida"))
+    File.write(File.join(macos, "license.txt"), "EULA\n")
+    File.chmod(0o644, File.join(macos, "license.txt"))
+    File.write(File.join(fw, "Versions", "A", "QtCore"), "fake-qt\n")
+    File.chmod(0o644, File.join(fw, "Versions", "A", "QtCore"))
+    File.symlink("A", File.join(fw, "Versions", "Current"))
+    File.symlink("Versions/Current/QtCore", File.join(fw, "QtCore"))
+
+    archive = File.join(@tmpdir, "IDA_Professional_9.5_arm64_app.tar.gz")
+    assert system("tar", "-C", src, "-czf", archive, app_name), "failed to create fixture tarball"
+
+    dest = File.join(@tmpdir, "app-out")
+    FileUtils.mkdir_p(dest)
+    assert system("tar", "-C", dest, "-xzf", archive), "failed to extract fixture tarball"
+
+    ida = File.join(dest, app_name, "Contents", "MacOS", "ida")
+    lic = File.join(dest, app_name, "Contents", "MacOS", "license.txt")
+    current = File.join(dest, app_name, "Contents", "Frameworks", "QtCore.framework", "Versions", "Current")
+    qt = File.join(dest, app_name, "Contents", "Frameworks", "QtCore.framework", "QtCore")
+    assert File.executable?(ida), "expected Contents/MacOS/ida to remain executable"
+    assert_equal 0o755, File.stat(ida).mode & 0o777
+    assert_equal 0o644, File.stat(lic).mode & 0o777
+    refute File.executable?(lic)
+    assert File.symlink?(current)
+    assert_equal "A", File.readlink(current)
+    assert File.symlink?(qt)
+    assert File.exist?(qt)
+    assert_equal "fake-qt\n", File.read(qt)
+  end
+
+
   private
 
   def new_strategy(url, cache: @cache, aliyunpan_executable: FAKE_CLI)
