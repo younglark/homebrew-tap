@@ -5,6 +5,7 @@ require "fileutils"
 require "open3"
 require "timeout"
 require "tmpdir"
+require "pathname"
 require "uri"
 
 # Downloads a single file with tickstep/aliyunpan into Homebrew's cache.
@@ -36,6 +37,12 @@ class AliyunpanDownloadStrategy < AbstractFileDownloadStrategy
 
     work_dir = Dir.mktmpdir("aliyunpan-fetch-")
     begin
+      # Resolve the exact expected path before invoking the CLI. tickstep/aliyunpan
+      # v0.4.0 saves to filepath.Join(saveto, f.Path), preserving the cloud
+      # hierarchy. Never File.join a work dir with an absolute cloud path, and
+      # never search recursively for a same-named file.
+      artifact = expected_artifact_path(work_dir, pan_path)
+
       command = [
         executable,
         "download",
@@ -50,11 +57,10 @@ class AliyunpanDownloadStrategy < AbstractFileDownloadStrategy
         raise AliyunpanDownloadError, failure_message(output, status, pan_path)
       end
 
-      artifact = File.join(work_dir, archive_name)
       unless File.file?(artifact) && File.size(artifact).positive?
         raise AliyunpanDownloadError, <<~MSG
           aliyunpan exited 0 but did not write #{archive_name} under #{work_dir}.
-          The CLI may have skipped a same-name file or saved somewhere else.
+          Expected #{artifact} (cloud path preserved under --saveto).
           Cloud path: #{pan_path}
           #{output.strip}
         MSG
@@ -108,6 +114,36 @@ class AliyunpanDownloadStrategy < AbstractFileDownloadStrategy
     end
 
     path
+  end
+
+  def expected_artifact_path(work_dir, pan_path)
+    parts = relative_cloud_components(pan_path)
+    work = Pathname.new(work_dir).expand_path
+    artifact = work.join(*parts).expand_path
+    unless path_inside?(work, artifact)
+      raise AliyunpanDownloadError, "cloud path escapes the save directory: #{pan_path}"
+    end
+
+    artifact
+  end
+
+  def relative_cloud_components(pan_path)
+    unless pan_path.start_with?("/")
+      raise AliyunpanDownloadError, "invalid or unsafe cloud path: #{pan_path}"
+    end
+
+    parts = Pathname.new(pan_path).each_filename.to_a
+    if parts.empty? || parts.any? { |part| part == ".." || part == "." }
+      raise AliyunpanDownloadError, "invalid or unsafe cloud path: #{pan_path}"
+    end
+
+    parts
+  end
+
+  def path_inside?(root, candidate)
+    root_s = root.expand_path.to_s
+    candidate_s = candidate.expand_path.to_s
+    candidate_s == root_s || candidate_s.start_with?("#{root_s}#{File::SEPARATOR}")
   end
 
   def locate_aliyunpan!
