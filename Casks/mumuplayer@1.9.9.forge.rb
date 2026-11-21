@@ -11,7 +11,7 @@ require strategy_path.to_s
 
 cask "mumuplayer@1.9.9.forge" do
   version "1.9.9.forge"
-  sha256 "d8dc31ac08f69f459f651a032dcc24fc92407071dc7aa259ed5c35a254c4e21d"
+  sha256 "67df0188576d9839ca097a1084e47950138cb2ebc0f494c4530a0ff41c4dddb0"
 
   url "aliyunpan:///Software/mumuplayer/#{version}/MuMuPlayer_Pro_#{version}_app.tar.gz",
       using: AliyunpanDownloadStrategy
